@@ -101,3 +101,86 @@
     (ok new-market-id)
   )
 )
+
+;; Position Entry System
+(define-public (enter-position
+    (market-id uint)
+    (sentiment (string-ascii 4))
+    (stake-amount uint)
+  )
+  (let (
+      (market-data (unwrap! (map-get? prediction-markets market-id) ERR_MARKET_NOT_FOUND))
+      (current-height stacks-block-height)
+    )
+    ;; Market Timing Validation
+    (asserts!
+      (and
+        (>= current-height (get market-start-height market-data))
+        (< current-height (get market-end-height market-data))
+      )
+      ERR_MARKET_UNAVAILABLE
+    )
+    ;; Sentiment Validation
+    (asserts! (or (is-eq sentiment "up") (is-eq sentiment "down"))
+      ERR_INVALID_PREDICTION_TYPE
+    )
+    ;; Stake Validation
+    (asserts! (>= stake-amount (var-get min-participation-stake))
+      ERR_INVALID_PREDICTION_TYPE
+    )
+    (asserts! (<= stake-amount (stx-get-balance tx-sender))
+      ERR_INSUFFICIENT_FUNDS
+    )
+    ;; Stake Transfer
+    (try! (stx-transfer? stake-amount tx-sender (as-contract tx-sender)))
+    ;; Position Recording
+    (map-set participant-positions {
+      market-id: market-id,
+      participant: tx-sender,
+    } {
+      market-sentiment: sentiment,
+      stake-amount: stake-amount,
+      rewards-claimed: false,
+    })
+    ;; Pool Updates
+    (map-set prediction-markets market-id
+      (merge market-data {
+        bullish-stake-pool: (if (is-eq sentiment "up")
+          (+ (get bullish-stake-pool market-data) stake-amount)
+          (get bullish-stake-pool market-data)
+        ),
+        bearish-stake-pool: (if (is-eq sentiment "down")
+          (+ (get bearish-stake-pool market-data) stake-amount)
+          (get bearish-stake-pool market-data)
+        ),
+      })
+    )
+    (ok true)
+  )
+)
+
+;; Market Settlement Engine
+(define-public (settle-market
+    (market-id uint)
+    (final-price uint)
+  )
+  (let ((market-data (unwrap! (map-get? prediction-markets market-id) ERR_MARKET_NOT_FOUND)))
+    ;; Oracle Authorization
+    (asserts! (is-eq tx-sender (var-get oracle-authority)) ERR_UNAUTHORIZED)
+    ;; Timing Validation
+    (asserts! (>= stacks-block-height (get market-end-height market-data))
+      ERR_MARKET_UNAVAILABLE
+    )
+    (asserts! (not (get settlement-completed market-data)) ERR_MARKET_UNAVAILABLE)
+    ;; Price Validation
+    (asserts! (> final-price u0) ERR_INVALID_PARAMETERS)
+    ;; Settlement Recording
+    (map-set prediction-markets market-id
+      (merge market-data {
+        final-price: final-price,
+        settlement-completed: true,
+      })
+    )
+    (ok true)
+  )
+)
