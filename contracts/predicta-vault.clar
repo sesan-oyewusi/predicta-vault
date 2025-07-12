@@ -184,3 +184,126 @@
     (ok true)
   )
 )
+
+;; Reward Distribution System
+(define-public (claim-rewards (market-id uint))
+  (let (
+      (market-data (unwrap! (map-get? prediction-markets market-id) ERR_MARKET_NOT_FOUND))
+      (participant-data (unwrap!
+        (map-get? participant-positions {
+          market-id: market-id,
+          participant: tx-sender,
+        })
+        ERR_MARKET_NOT_FOUND
+      ))
+    )
+    ;; Settlement Validation
+    (asserts! (get settlement-completed market-data) ERR_MARKET_UNAVAILABLE)
+    (asserts! (not (get rewards-claimed participant-data))
+      ERR_REWARD_ALREADY_CLAIMED
+    )
+    ;; Winning Sentiment Calculation
+    (let (
+        (winning-sentiment (if (> (get final-price market-data) (get initial-price market-data))
+          "up"
+          "down"
+        ))
+        (total-market-stake (+ (get bullish-stake-pool market-data)
+          (get bearish-stake-pool market-data)
+        ))
+        (winning-pool-stake (if (is-eq winning-sentiment "up")
+          (get bullish-stake-pool market-data)
+          (get bearish-stake-pool market-data)
+        ))
+      )
+      ;; Winner Validation
+      (asserts! (is-eq (get market-sentiment participant-data) winning-sentiment)
+        ERR_INVALID_PREDICTION_TYPE
+      )
+      ;; Reward Calculation
+      (let (
+          (gross-rewards (/ (* (get stake-amount participant-data) total-market-stake)
+            winning-pool-stake
+          ))
+          (protocol-fee (/ (* gross-rewards (var-get protocol-fee-rate)) u100))
+          (net-rewards (- gross-rewards protocol-fee))
+        )
+        ;; Reward Distribution
+        (try! (as-contract (stx-transfer? net-rewards (as-contract tx-sender) tx-sender)))
+        (try! (as-contract (stx-transfer? protocol-fee (as-contract tx-sender) CONTRACT_OWNER)))
+        ;; Claim Status Update
+        (map-set participant-positions {
+          market-id: market-id,
+          participant: tx-sender,
+        }
+          (merge participant-data { rewards-claimed: true })
+        )
+        (ok net-rewards)
+      )
+    )
+  )
+)
+
+;; QUERY FUNCTIONS
+
+;; Market Data Retrieval
+(define-read-only (get-market-info (market-id uint))
+  (map-get? prediction-markets market-id)
+)
+
+;; Participant Data Retrieval
+(define-read-only (get-participant-position
+    (market-id uint)
+    (participant principal)
+  )
+  (map-get? participant-positions {
+    market-id: market-id,
+    participant: participant,
+  })
+)
+
+;; Contract Treasury Status
+(define-read-only (get-treasury-balance)
+  (stx-get-balance (as-contract tx-sender))
+)
+
+;; ADMINISTRATIVE FUNCTIONS
+
+;; Oracle Authority Management
+(define-public (update-oracle-authority (new-oracle principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (is-eq new-oracle new-oracle) ERR_INVALID_PARAMETERS)
+    (ok (var-set oracle-authority new-oracle))
+  )
+)
+
+;; Stake Requirements Management
+(define-public (update-minimum-stake (new-minimum uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (> new-minimum u0) ERR_INVALID_PARAMETERS)
+    (ok (var-set min-participation-stake new-minimum))
+  )
+)
+
+;; Fee Structure Management
+(define-public (update-protocol-fee (new-fee-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (<= new-fee-rate u100) ERR_INVALID_PARAMETERS)
+    (ok (var-set protocol-fee-rate new-fee-rate))
+  )
+)
+
+;; Treasury Management
+(define-public (withdraw-treasury-funds (withdrawal-amount uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (<= withdrawal-amount (stx-get-balance (as-contract tx-sender)))
+      ERR_INSUFFICIENT_FUNDS
+    )
+    (try! (as-contract (stx-transfer? withdrawal-amount (as-contract tx-sender) CONTRACT_OWNER)))
+    (ok withdrawal-amount)
+  )
+)
